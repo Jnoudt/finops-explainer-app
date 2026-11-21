@@ -1,0 +1,122 @@
+name: FinOps App CI and Deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: finops-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Python and frontend quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-sec.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt -r requirements-sec.txt
+
+      - name: Ruff lint and format
+        run: |
+          ruff check src tests function_app.py
+          ruff format --check src tests function_app.py
+
+      - name: Mypy
+        run: mypy src tests function_app.py
+
+      - name: Pytest
+        run: pytest -q
+
+      - name: Bandit
+        run: bandit -r src function_app.py -q
+
+      - name: pip-audit
+        run: pip-audit -r requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend dependency audit
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Frontend lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Frontend build
+        working-directory: frontend
+        run: npm run build
+
+  deploy-functions:
+    name: Deploy Azure Functions
+    needs: quality
+    if: >-
+      ${{
+        github.ref == 'refs/heads/main' &&
+        github.event_name != 'pull_request' &&
+        vars.AZURE_FUNCTIONAPP_NAME != ''
+      }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate OIDC deployment variables
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_FUNCTIONAPP_NAME: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
+        shell: bash
+        run: |
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_FUNCTIONAPP_NAME; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Required repository variable $name is not configured."
+              exit 1
+            fi
+          done
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Python Function App
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
+          package: .
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true

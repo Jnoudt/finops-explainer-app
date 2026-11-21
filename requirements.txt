@@ -1,0 +1,7 @@
+azure-functions==1.23.0
+azure-cosmos==4.9.0
+azure-identity==1.25.1
+azure-mgmt-costmanagement==4.0.1
+azure-storage-blob==12.27.1
+openai==2.8.1
+pydantic==2.12.5
